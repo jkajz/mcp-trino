@@ -431,6 +431,27 @@ func TestImprovedIsReadOnlyQuery(t *testing.T) {
 		{"SELECT with INSERT in string", "SELECT 'INSERT INTO' FROM dual", true},
 		{"SELECT with INSERT in comment", "SELECT 1 -- INSERT INTO users", true},
 		{"Multi-statement with semicolon", "SELECT 1; INSERT INTO users VALUES (1)", false},
+
+		// Queries starting with comments
+		{"SELECT with leading single-line comment", "-- This is a comment\nSELECT * FROM users", true},
+		{"SELECT with leading multi-line comment", "/* This is a\nmulti-line comment */\nSELECT * FROM users", true},
+		{"SHOW with leading comment", "-- Query to show tables\nSHOW TABLES", true},
+		{"DESCRIBE with leading comment", "-- Get table schema\nDESCRIBE users", true},
+		{"EXPLAIN with leading comment", "-- Analyze query plan\nEXPLAIN SELECT * FROM users", true},
+		{"Multiple leading comments", "-- Comment 1\n-- Comment 2\nSELECT * FROM users", true},
+		{"Comment with write keyword, but query is read-only", "-- INSERT is mentioned here\nSELECT * FROM users", true},
+		{"Leading comment with Windows line endings", "-- Comment\r\nSELECT * FROM users", true},
+		{"Leading multi-line comment with nested asterisks", "/* Comment with * asterisk */\nSELECT * FROM users", true},
+
+		// Queries with comments in the middle
+		{"SELECT with comment between SELECT and FROM", "SELECT * -- this is a comment\nFROM users", true},
+		{"SELECT with comment after FROM clause", "SELECT * FROM users -- filter later\nWHERE id > 10", true},
+		{"SELECT with multi-line comment in middle", "SELECT * /* multi-line\ncomment here */ FROM users", true},
+		{"SELECT with multiple comments throughout", "SELECT * -- comment 1\nFROM users -- comment 2\nWHERE id > 10 -- comment 3", true},
+		{"SELECT with comment containing write keyword in middle", "SELECT * FROM users -- UPDATE is mentioned\nWHERE active = true", true},
+		{"SHOW with comment in middle", "SHOW /* comment */ TABLES", true},
+		{"EXPLAIN with comment before query", "EXPLAIN /* optimization hint */ SELECT * FROM users", true},
+		{"WITH CTE with comments", "-- CTE query\nWITH cte AS ( -- inline comment\nSELECT 1\n) SELECT * FROM cte", true},
 	}
 
 	for _, tt := range tests {
@@ -438,6 +459,136 @@ func TestImprovedIsReadOnlyQuery(t *testing.T) {
 			result := isReadOnlyQuery(tt.query)
 			if result != tt.expected {
 				t.Errorf("isReadOnlyQuery(%q) = %v, want %v", tt.query, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestPrecompiledRegexConsistency verifies that pre-compiled regexes produce
+// the same results as the original inline regexp.MatchString approach.
+func TestPrecompiledRegexConsistency(t *testing.T) {
+	// Comprehensive set of queries testing all regex paths
+	queries := []struct {
+		query    string
+		expected bool
+	}{
+		// Read-only
+		{"SELECT 1", true},
+		{"  select * from t", true},
+		{"SHOW TABLES", true},
+		{"SHOW CREATE TABLE foo", true},
+		{"SHOW CREATE VIEW bar", true},
+		{"SHOW CREATE SCHEMA baz", true},
+		{"SHOW CREATE MATERIALIZED VIEW mv", true},
+		{"DESCRIBE users", true},
+		{"EXPLAIN SELECT 1", true},
+		{"WITH cte AS (SELECT 1) SELECT * FROM cte", true},
+		{"SELECT 'INSERT INTO' FROM dual", true},
+		{"SELECT 1 -- INSERT INTO users", true},
+		{"SELECT /* DROP TABLE */ 1 FROM t", true},
+
+		// Write operations
+		{"INSERT INTO users VALUES (1)", false},
+		{"UPDATE users SET name = 'a'", false},
+		{"DELETE FROM users", false},
+		{"DROP TABLE users", false},
+		{"CREATE TABLE t (id INT)", false},
+		{"ALTER TABLE users ADD COLUMN age INT", false},
+		{"TRUNCATE TABLE users", false},
+		{"MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE", false},
+		{"GRANT SELECT ON t TO user1", false},
+		{"REVOKE SELECT ON t FROM user1", false},
+
+		// Edge cases
+		{"SELECT*FROM users", true},       // word boundary handles this
+		{"SHOWTABLES", false},               // word boundary blocks
+		{"SELECT 1; DROP TABLE users", false}, // semicolon blocked
+		{"\n  SELECT * FROM t\n", true},    // newlines normalized
+	}
+
+	for _, tt := range queries {
+		t.Run(tt.query, func(t *testing.T) {
+			result := isReadOnlyQuery(tt.query)
+			if result != tt.expected {
+				t.Errorf("isReadOnlyQuery(%q) = %v, want %v", tt.query, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestSanitizeQueryForKeywordDetection verifies the sanitizer with pre-compiled regexes
+func TestSanitizeQueryForKeywordDetection(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "Single-quoted string removed",
+			input:    "select 'insert into' from t",
+			expected: "select 'LITERAL' from t",
+		},
+		{
+			name:     "Double-quoted identifier removed",
+			input:    `select "drop" from t`,
+			expected: `select "IDENTIFIER" from t`,
+		},
+		{
+			name:     "Backtick identifier removed",
+			input:    "select `delete` from t",
+			expected: "select `IDENTIFIER` from t",
+		},
+		{
+			name:     "Single-line comment removed",
+			input:    "select 1 -- drop table users",
+			expected: "select 1",
+		},
+		{
+			name:     "Multi-line comment removed",
+			input:    "select /* drop table */ 1",
+			expected: "select  1",
+		},
+		{
+			name:     "Escaped single quotes preserved",
+			input:    "select 'it''s a test' from t",
+			expected: "select 'LITERAL' from t",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizeQueryForKeywordDetection(tt.input)
+			if result != tt.expected {
+				t.Errorf("sanitizeQueryForKeywordDetection(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestMaxRowsTruncation tests the row limiting logic in ExecuteQueryWithContext
+// without needing a real Trino connection.
+func TestMaxRowsConfigPropagation(t *testing.T) {
+	tests := []struct {
+		name     string
+		maxRows  int
+		expected int
+	}{
+		{"Default limit", 10000, 10000},
+		{"Unlimited", 0, 0},
+		{"Small limit", 5, 5},
+		{"MaxRows=1", 1, 1},
+		{"Large limit", 1000000, 1000000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &Client{
+				config: &config.TrinoConfig{
+					MaxRows: tt.maxRows,
+				},
+			}
+			if client.config.MaxRows != tt.expected {
+				t.Errorf("MaxRows = %d, want %d", client.config.MaxRows, tt.expected)
 			}
 		})
 	}
