@@ -10,7 +10,7 @@ set -euo pipefail
 #   --help               Show this help message
 
 # Configuration - can be overridden via environment variables
-REPO="tuannvm/mcp-trino"
+REPO="jkajz/mcp-trino"
 BINARY_NAME="mcp-trino"
 MCP_SERVER_NAME="mcp-trino"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"

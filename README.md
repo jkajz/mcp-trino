@@ -1,5 +1,11 @@
 # Trino MCP Server in Go
 
+> **This is a fork of [tuannvm/mcp-trino](https://github.com/tuannvm/mcp-trino).** It adds one fix:
+> the server leaves the default port out of the HTTP `Host` header (`host`, not `host:80`).
+> Some reverse proxies route by exact host name and answer `host:80` with a 503.
+> Everything else is upstream. Install it from this fork's releases (see [Installation](#installation--quick-start)),
+> not from the upstream Homebrew tap, which ships the unpatched build.
+
 A high-performance Model Context Protocol (MCP) server for Trino implemented in Go. This project enables AI assistants to seamlessly interact with Trino's distributed SQL query engine through standardized MCP tools.
 
 [![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/tuannvm/mcp-trino/build.yml?branch=main&label=CI%2FCD&logo=github)](https://github.com/tuannvm/mcp-trino/actions/workflows/build.yml)
@@ -113,13 +119,33 @@ graph TB
 
 **Install:**
 
-```bash
-# Homebrew
-brew install tuannvm/mcp/mcp-trino
+No Go toolchain needed. The script downloads a prebuilt binary from this fork's
+[releases](https://github.com/jkajz/mcp-trino/releases) into `~/.local/bin`:
 
-# Or one-liner (macOS/Linux)
-curl -fsSL https://raw.githubusercontent.com/tuannvm/mcp-trino/main/install.sh | bash
+```bash
+# macOS/Linux, latest release
+curl -fsSL https://raw.githubusercontent.com/jkajz/mcp-trino/main/install.sh | bash
+
+# A specific release
+curl -fsSL https://raw.githubusercontent.com/jkajz/mcp-trino/main/install.sh | bash -s -- --version=v4.3.2
 ```
+
+Or download the archive for your OS from the [releases page](https://github.com/jkajz/mcp-trino/releases),
+check it against `mcp-trino_<version>_checksums.txt`, and put `mcp-trino` on your `PATH`.
+
+Do not use `brew install tuannvm/mcp/mcp-trino`: that is the upstream build without the `Host` header fix.
+
+**Add it to Claude Code (read-only):**
+
+```bash
+claude mcp add trino \
+  -e TRINO_HOST=trino.example.internal -e TRINO_PORT=80 -e TRINO_SCHEME=http -e TRINO_SSL=false \
+  -e TRINO_USER=your-name -e TRINO_CATALOG=your_catalog \
+  -- ~/.local/bin/mcp-trino
+```
+
+Write queries are blocked unless `TRINO_ALLOW_WRITE_QUERIES=true` is set, so leave it unset.
+Only `SELECT`, `SHOW`, `DESCRIBE`, `EXPLAIN` and `WITH` queries are allowed, one statement at a time.
 
 **Run (Local Development):**
 
